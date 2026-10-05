@@ -8,5 +8,7 @@ import java.util.Optional;
 
 public interface SeatRepository extends JpaRepository<Seat, Long> {
 
-    Optional<Seat> findByIdAndEventId(Long id, Long eventId);// to get the seats belonging to event id
+    List<Seat> findByEventId(Long eventId);//get all seats for an event
+
+    Optional<Seat> findByIdAndEventId(Long id, Long eventId);// Get one specific seat, but only if it belongs to that event.
 }
