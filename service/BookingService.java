@@ -8,6 +8,7 @@ import org.rushandler.rushandler.exception.ResourceConflictException;
 import org.rushandler.rushandler.exception.ResourceNotFoundException;
 import org.rushandler.rushandler.redis.LockResult;
 import org.rushandler.rushandler.redis.RedisLockService;
+import org.rushandler.rushandler.redis.RedisSeatEventPublisher;
 import org.rushandler.rushandler.repository.BookingRepository;
 import org.rushandler.rushandler.repository.EventRepository;
 import org.rushandler.rushandler.repository.SeatRepository;
@@ -26,18 +27,32 @@ public class BookingService {
     private final BookingRepository bookingRepository;
     private final RedisLockService redisLockService;
     private final TransactionTemplate transactionTemplate;
+    private final RedisSeatEventPublisher seatEventPublisher;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public BookingService(
+            EventRepository eventRepository,
+            SeatRepository seatRepository,
+            BookingRepository bookingRepository,
+            RedisLockService redisLockService,
+            PlatformTransactionManager transactionManager,
+            RedisSeatEventPublisher seatEventPublisher) {
+        this.eventRepository = eventRepository;
+        this.seatRepository = seatRepository;
+        this.bookingRepository = bookingRepository;
+        this.redisLockService = redisLockService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.seatEventPublisher = seatEventPublisher;
+    }
+
+    // Overload for backward compatibility and test convenience
     public BookingService(
             EventRepository eventRepository,
             SeatRepository seatRepository,
             BookingRepository bookingRepository,
             RedisLockService redisLockService,
             PlatformTransactionManager transactionManager) {
-        this.eventRepository = eventRepository;
-        this.seatRepository = seatRepository;
-        this.bookingRepository = bookingRepository;
-        this.redisLockService = redisLockService;
-        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this(eventRepository, seatRepository, bookingRepository, redisLockService, transactionManager, null);
     }
 
     public BookingResponse bookSeat(Long eventId, Long seatId, String userId) {
@@ -58,7 +73,6 @@ public class BookingService {
 
         try {
             // 4. In a short database transaction: check whether already booked and create Booking
-            //Everything inside this block should happen as ONE database transaction
             Booking booking = transactionTemplate.execute(status -> {
                 if (bookingRepository.findByEventIdAndSeatId(eventId, seatId).isPresent()) {
                     throw new ResourceConflictException("Seat has already been booked for this event.");
@@ -74,13 +88,17 @@ public class BookingService {
                 return bookingRepository.save(newBooking);
             });
 
+            // 5. Publish SEAT_BOOKED event ONLY after successful transaction commit
+            if (seatEventPublisher != null) {
+                seatEventPublisher.publishSeatBooked(eventId, seatId);
+            }
+
             return BookingResponse.fromEntity(booking);
-            //last effort to stop duplication
         } catch (DataIntegrityViolationException ex) {
             // Final database-level unique constraint safety net
             throw new ResourceConflictException("Seat has already been booked for this event.");
         } finally {
-            // 5. Release Redis lock safely using the owned token
+            // 6. Release Redis lock safely using the owned token even if something failed
             redisLockService.releaseLock(eventId, seatId, lockResult.getToken());
         }
     }
